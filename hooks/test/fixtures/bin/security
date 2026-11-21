@@ -1,0 +1,12 @@
+#!/bin/sh
+# Fake security: logs argv and cwd to $FAKE_LOG, prints $FAKE_SECURITY_STDOUT / $FAKE_SECURITY_STDERR, exits $FAKE_SECURITY_EXIT.
+if [ -n "$FAKE_LOG" ]; then
+  {
+    echo "--- security"
+    echo "cwd: $PWD"
+    for a in "$@"; do echo "arg: $a"; done
+  } >> "$FAKE_LOG"
+fi
+[ -n "$FAKE_SECURITY_STDOUT" ] && printf '%s\n' "$FAKE_SECURITY_STDOUT"
+[ -n "$FAKE_SECURITY_STDERR" ] && printf '%s\n' "$FAKE_SECURITY_STDERR" >&2
+exit "${FAKE_SECURITY_EXIT:-0}"

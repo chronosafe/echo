@@ -1,0 +1,13 @@
+#!/bin/sh
+# Fake gh: logs argv and cwd to $FAKE_LOG, prints $FAKE_GH_STDOUT / $FAKE_GH_STDERR, exits $FAKE_GH_EXIT.
+if [ -n "$FAKE_LOG" ]; then
+  {
+    echo "--- gh"
+    echo "cwd: $PWD"
+    echo "GH_REPO: ${GH_REPO:-}"
+    for a in "$@"; do echo "arg: $a"; done
+  } >> "$FAKE_LOG"
+fi
+[ -n "$FAKE_GH_STDOUT" ] && printf '%s\n' "$FAKE_GH_STDOUT"
+[ -n "$FAKE_GH_STDERR" ] && printf '%s\n' "$FAKE_GH_STDERR" >&2
+exit "${FAKE_GH_EXIT:-0}"

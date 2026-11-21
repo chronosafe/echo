@@ -1,0 +1,13 @@
+{
+  "name": "echo",
+  "private": true,
+  "workspaces": ["service", "hooks"],
+  "scripts": {
+    "check-peers": "node scripts/check-peers.mjs",
+    "test": "npm run check-peers && npm test --workspaces --if-present",
+    "e2e": "node scripts/e2e.mjs"
+  },
+  "devDependencies": {
+    "semver": "7.8.6"
+  }
+}
