@@ -40,6 +40,7 @@ import { githubAppConfigured, kickStatusJobs } from '../github/status';
 import { parseZonedTime } from '../time';
 import { COOKIE, SESSION_MS, csp, makeSession, passwordOk, randomNonce, requireAdmin } from './auth';
 import type { AdminEnv } from './auth';
+import { chooseDay, dayOptions, dayRange, zoneFromCookieHeader } from './localtime';
 import { loginPage, plainPage, projectPage, projectsPage, scheduleFragment, sectionPage } from './views';
 import type { Section, SectionData, Shown } from './views';
 
@@ -62,6 +63,9 @@ admin.onError((e, c) => {
 });
 
 const ADMIN_NOTE = 'by the owner';
+
+/** The viewer's zone from the echo_tz cookie, else Eastern. */
+const zoneOf = (c: Context<AdminEnv>) => zoneFromCookieHeader(c.req.header('cookie'));
 
 // ---------------------------------------------------------------- login
 
@@ -112,7 +116,7 @@ async function renderIndex(c: Context<AdminEnv>, ctx: Ctx, extra: { error?: stri
       notify,
       // Without the App nothing is written, so there are no write failures to show: the page says statuses are off.
       githubAppConfigured(ctx) ? [...byRepo].map(([repo, error]) => ({ repo, error })) : null,
-      extra,
+      { ...extra, tz: zoneOf(c), nonce: c.get('nonce'), reload: c.req.method === 'GET', now: ctx.now() },
     ),
     status,
   );
@@ -127,14 +131,20 @@ function idParam(c: Context<AdminEnv>): number | null {
 
 async function renderProject(c: Context<AdminEnv>, ctx: Ctx, projectId: number, error?: string, status: ContentfulStatusCode = 200) {
   const project = await getProject(ctx, projectId);
-  const [holds, messages, agents, todos, changes] = await Promise.all([
+  const tz = zoneOf(c);
+  const now = ctx.now();
+  const days = dayOptions(Date.parse(now), tz);
+  const day = chooseDay(c.req.query('day'), days);
+  const range = dayRange(day.value, tz);
+  const [holds, messages, agents, todos, changes, schedule] = await Promise.all([
     adminListHolds(ctx, projectId),
     pendingMessages(ctx, projectId),
     projectMembers(ctx, projectId),
     listTodos(ctx, { kind: 'admin' }, projectId, {}),
     recentChanges(ctx, projectId, 20),
+    daySchedule(ctx, projectId, range.from, range.to),
   ]);
-  return c.html(projectPage({ project, holds, messages, agents, todos, changes, now: ctx.now(), nonce: c.get('nonce'), error }), status);
+  return c.html(projectPage({ project, holds, messages, agents, todos, changes, now, nonce: c.get('nonce'), tz, reload: c.req.method === 'GET', schedule: day.today ? schedule : schedule.map((r) => ({ ...r, isNext: false })), days, day, error }), status);
 }
 
 function errorResponse(c: Context<AdminEnv>, e: EchoError) {
@@ -170,7 +180,7 @@ admin.get('/p/:id/schedule', async (c) => {
     if (e instanceof EchoError && e.kind === 'rule') return c.text(e.message, e.status as ContentfulStatusCode);
     throw e;
   }
-  return c.html(scheduleFragment(await daySchedule(ctx, id, from, to)));
+  return c.html(scheduleFragment(await daySchedule(ctx, id, from, to), zoneOf(c)));
 });
 
 // ---------------------------------------------------------------- actions
@@ -312,7 +322,7 @@ async function renderSection(
 ) {
   const project = await getProject(ctx, projectId);
   const data = await sectionData(ctx, projectId, section, o.open, o.showAll);
-  return c.html(sectionPage({ project, data, error: o.error, shown: o.shown }), o.status ?? 200);
+  return c.html(sectionPage({ project, data, error: o.error, shown: o.shown, tz: zoneOf(c), nonce: c.get('nonce'), now: ctx.now(), reload: c.req.method === 'GET' }), o.status ?? 200);
 }
 
 for (const section of SECTIONS) {
