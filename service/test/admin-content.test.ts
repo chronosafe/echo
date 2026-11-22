@@ -658,7 +658,7 @@ describe('content', () => {
     const list = await (await get(`${P}/documents`, cookie)).text();
     expect(list).toContain('notes.md');
     const v1 = await (await get(`${P}/documents/notes.md?version=1`, cookie)).text();
-    expect(v1).toMatch(/<pre[^>]*>v1 &lt;script&gt;x&lt;\/script&gt;<\/pre>/);
+    expect(v1).toMatch(/<pre[^>]*>\n?v1 &lt;script&gt;x&lt;\/script&gt;<\/pre>/);
     expect(v1).not.toContain('<script>x');
     const latest = await (await get(`${P}/documents/notes.md`, cookie)).text();
     expect(latest).toContain('v2 body');
