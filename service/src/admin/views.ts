@@ -9,6 +9,9 @@ import type { DocumentInfo, Document } from '../domain/documents';
 import type { ScratchEntry } from '../domain/scratchpad';
 import type { WebhookInfo } from '../domain/webhooks';
 import type { Todo } from '../domain/todos';
+import { DEFAULT_ZONE, TZ_SCRIPT, fmtDateTime, fmtTime } from './localtime';
+import type { DayOption } from './localtime';
+import { summarizeMergeDetail } from './summary';
 
 // Every dynamic value below goes through `html` tagged templates, which escape it. `raw()` is used only for the static
 // CSS and the static script, neither of which contains any server data.
@@ -231,6 +234,8 @@ ul.plain > li:first-child { padding-top: 0; }
 .rcpt { margin-bottom: 6px; min-width: 16em; } .rcpt:last-child { margin-bottom: 0; }
 time { white-space: nowrap; }
 .rcpt .badge { margin-left: 4px; }
+.daypick { margin-left: auto; } .daypick select { font: inherit; }
+.full { margin-top: 2px; } .full summary { cursor: pointer; font-size: 13px; color: var(--mut); } .full .body { margin-top: 4px; }
 .vers { display: flex; flex-wrap: wrap; gap: 4px; }
 .vers a { padding: 1px 8px; border-radius: 999px; border: 1px solid var(--rule); text-decoration: none; font-size: 13px; }
 .vers a.on { background: var(--acc); border-color: var(--acc); color: var(--acc-ink); }
@@ -247,34 +252,20 @@ pre { white-space: pre-wrap; word-break: break-word; margin: 0; padding: 14px 16
 .solo input[type=password] { width: 100%; margin-top: 4px; }
 `);
 
-// Reads the project id from a data- attribute, fetches the server-rendered fragment for the browser's local day,
-// and shows times in local time. No server data is interpolated into this script.
-const SCHEDULE_SCRIPT = raw(`
-(function () {
-  var el = document.getElementById('schedule');
-  if (!el) return;
-  var start = new Date(); start.setHours(0, 0, 0, 0);
-  var end = new Date(start); end.setDate(end.getDate() + 1);
-  var url = '/admin/p/' + encodeURIComponent(el.getAttribute('data-project')) +
-    '/schedule?from=' + encodeURIComponent(start.toISOString()) + '&to=' + encodeURIComponent(end.toISOString());
-  fetch(url, { credentials: 'same-origin' }).then(function (r) {
-    if (r.redirected || !r.ok) {
-      el.textContent = r.redirected ? 'Your session has expired; reload the page.' : 'Could not load the schedule (error ' + r.status + ').';
-      return null;
-    }
-    return r.text();
-  }).then(function (t) {
-    if (t === null) return;
-    el.innerHTML = t;
-    el.querySelectorAll('time[datetime]').forEach(function (n) {
-      var d = new Date(n.getAttribute('datetime'));
-      if (!isNaN(d)) n.textContent = d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
-    });
-  }).catch(function () { el.textContent = 'Could not load the schedule.'; });
-})();
-`);
+// Times render in one zone per page: the viewer's (echo_tz cookie) or Eastern. A view sets it on entry, and rendering
+// is synchronous after that (no await between useZone and the finished string), so concurrent requests cannot see
+// each other's zone. Keep it that way: never await inside a view.
+let zone = DEFAULT_ZONE;
+let nowIso = new Date().toISOString();
+let reloadOk = false;
+/** reload: the page was a GET, so the zone script may re-request it; a POST result page must never be re-requested. */
+function useZone(tz: string | undefined, now?: string, reload = false): void {
+  reloadOk = reload;
+  zone = tz ?? DEFAULT_ZONE;
+  nowIso = now ?? new Date().toISOString();
+}
 
-function layout(title: string, body: Html, opts: { nonce?: string; script?: boolean; loggedIn?: boolean } = {}): Html {
+function layout(title: string, body: Html, opts: { nonce?: string; loggedIn?: boolean } = {}): Html {
   return html`<!doctype html>
 <html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
 <meta name="color-scheme" content="light dark">
@@ -282,7 +273,7 @@ function layout(title: string, body: Html, opts: { nonce?: string; script?: bool
 <body><header class="top"><div class="bar"><a class="brand" href="/admin"><svg width="24" height="24" viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="5" cy="12" r="2.4" fill="currentColor" stroke="none"/><path d="M9.5 7.5a6.4 6.4 0 0 1 0 9"/><path d="M13 4.6a10.6 10.6 0 0 1 0 14.8" opacity=".62"/><path d="M16.6 2a14.4 14.4 0 0 1 0 20" opacity=".3"/></svg>Echo admin</a>
 ${opts.loggedIn === false ? '' : html`<form class="inline" method="post" action="/admin/logout"><button class="quiet">Log out</button></form>`}</div></header>
 <main class="wrap">${body}</main>
-${opts.script ? html`<script nonce="${opts.nonce ?? ''}">${SCHEDULE_SCRIPT}</script>` : ''}
+${opts.nonce ? html`<script nonce="${opts.nonce}" data-reload="${reloadOk ? '1' : '0'}" data-zone="${zone}">${raw(TZ_SCRIPT)}</script>` : ''}
 </body></html>`;
 }
 
@@ -298,16 +289,11 @@ function count(n: number, tone?: Tone): Html {
   return html`<span class="count${tone && n > 0 ? ` t-${tone}` : ''}">${n}</span>`;
 }
 
-const MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
-const pad2 = (n: number) => String(n).padStart(2, '0');
-
-/** A stored UTC time, shown as "Nov 18, 11:00 UTC" (with the year when it is not this year); the exact value is in datetime and title. */
+/** A stored UTC time shown in the page's zone, e.g. "Nov 18, 6:00 PM EST"; the exact UTC value is in datetime and title. */
 function utc(iso: string | null | undefined, none = 'never'): Html | string {
   if (!iso) return none;
-  const d = new Date(iso);
-  if (Number.isNaN(d.getTime())) return html`${iso}`;
-  const year = d.getUTCFullYear() === new Date().getUTCFullYear() ? '' : ` ${d.getUTCFullYear()}`;
-  const text = `${MONTHS[d.getUTCMonth()]} ${d.getUTCDate()}${year}, ${pad2(d.getUTCHours())}:${pad2(d.getUTCMinutes())} UTC`;
+  const text = fmtDateTime(iso, zone, nowIso);
+  if (text === null) return html`${iso}`;
   return html`<time datetime="${iso}" title="${iso}">${text}</time>`;
 }
 
@@ -360,8 +346,9 @@ export function projectsPage(
   notifyUrl: string | null,
   /** null: the GitHub App is not configured, so no status is sent and there are no write failures. */
   failures: FailedStatus[] | null,
-  extra: { error?: string; notice?: string } = {},
+  extra: { error?: string; notice?: string; tz?: string; nonce?: string; reload?: boolean; now?: string } = {},
 ): Html {
+  useZone(extra.tz, extra.now, extra.reload);
   return layout(
     'Echo projects',
     html`<div class="head"><h1>Projects</h1></div>
@@ -390,6 +377,7 @@ ${revokedAgents.length
           (a) => html`<tr><td>${a.name}<div class="sub">revoked ${utc(a.revoked_at)}</div></td><td class="acts">${confirmPost(`/admin/agents/${a.id}/delete`, 'Delete agent', 'Yes, delete this agent permanently')}</td></tr>`,
         )}</tbody></table></section>`
       : ''}</aside></div>`,
+    { nonce: extra.nonce },
   );
 }
 
@@ -404,13 +392,27 @@ const SCHEDULE_TONE: Record<ScheduleRow['status'], Tone> = {
 };
 
 /** The schedule fragment: also the response of GET /admin/p/:id/schedule. */
-export function scheduleFragment(rows: ScheduleRow[]): Html {
-  if (!rows.length) return html`<p class="empty">No merges scheduled today.</p>`;
+export function scheduleFragment(rows: ScheduleRow[], tz?: string, empty = 'No merges scheduled today.'): Html {
+  useZone(tz);
+  return scheduleTable(rows, empty);
+}
+
+/** The headline of a merge: a short summary of its note, with the full text kept in a disclosure and the tooltip. */
+function mergeHeadline(title: string, pr?: number | null): Html {
+  const full = title.replace(/\s+/g, ' ').trim();
+  const { headline, more } = summarizeMergeDetail(full, pr);
+  if (headline === full) return html`${full}`;
+  // "(more)" is the safety net: the headline left real content out, so a warning the summary missed still signals itself.
+  return html`<span title="${full}">${headline}</span><details class="full"><summary>Full note${more ? ' (more)' : ''}</summary><div class="body">${title}</div></details>`;
+}
+
+function scheduleTable(rows: ScheduleRow[], empty: string): Html {
+  if (!rows.length) return html`<p class="empty">${empty}</p>`;
   return html`<table class="tbl sched"><thead><tr><th>Time</th><th>PR</th><th>Merger</th><th>Importance</th><th>Status</th><th>Approvals</th></tr></thead><tbody>
 ${rows.map(
     (r) => html`<tr class="t-${SCHEDULE_TONE[r.status] ?? 'info'}${r.isNext ? ' next' : ''}">
-<td class="when"><time datetime="${r.startsAt}">${r.startsAt.slice(11, 16)}</time>${r.isNext ? html` ${badge('next', 'info')}` : ''}</td>
-<td class="wide" data-label="PR">${r.repo ? html`<span class="ref">${r.repo}#${r.pr}</span><div class="sub">${r.title}</div>` : r.title}</td>
+<td class="when"><time datetime="${r.startsAt}" title="${r.startsAt}">${fmtTime(r.startsAt, zone) ?? r.startsAt}</time>${r.isNext ? html` ${badge('next', 'info')}` : ''}</td>
+<td class="wide" data-label="PR">${r.repo ? html`<span class="ref">${r.repo}#${r.pr}</span><div class="sub">${mergeHeadline(r.title, r.pr)}</div>` : mergeHeadline(r.title)}</td>
 <td data-label="Merger">${r.merger ?? html`<span class="mut">none</span>`}</td><td data-label="Importance">${r.importance === 'high' ? html`<strong>high</strong>` : r.importance}</td>
 <td data-label="Status">${badge(r.status.replace('_', ' '), SCHEDULE_TONE[r.status] ?? 'info')}</td>
 <td class="wide" data-label="Approvals">${r.approvers.length ? r.approvers.map(
@@ -514,6 +516,12 @@ export type ProjectPageData = {
   changes: Change[];
   now: string;
   nonce: string;
+  tz: string;
+  reload?: boolean;
+  /** The merges of the chosen day, the seven day choices, and which one is shown. */
+  schedule: ScheduleRow[];
+  days: DayOption[];
+  day: DayOption;
   error?: string;
 };
 
@@ -524,18 +532,25 @@ function projectHead(project: ProjectRow, active: Section | ''): Html {
 ${nav(project.id, active)}`;
 }
 
+function dayPicker(projectId: number, days: DayOption[], day: DayOption): Html {
+  return html`<form class="inline daypick" method="get" action="/admin/p/${projectId}#merges"><label>Day <select name="day" data-autosubmit aria-label="Day">${days.map(
+    (o) => html`<option value="${o.value}"${o.value === day.value ? html` selected` : ''}>${o.label}</option>`,
+  )}</select></label><noscript> <button class="small">Show</button></noscript></form>`;
+}
+
 export function projectPage(d: ProjectPageData): Html {
+  useZone(d.tz, d.now, d.reload);
   return layout(
     `Echo ${d.project.name}`,
     html`${projectHead(d.project, '')}
 ${d.error ? banner(d.error, 'err') : ''}
 ${situation(d.holds, d.messages)}
 <div class="layout"><div>
-<section class="panel" id="merges"><div class="ph"><h2>Today's merges</h2><span class="mut">times in your local zone</span></div><div id="schedule" data-project="${d.project.id}"><p class="empty">Loading...</p></div></section>
+<section class="panel" id="merges"><div class="ph"><h2>${d.day.today ? "Today's merges" : html`Merges on ${d.day.label}`}</h2>${dayPicker(d.project.id, d.days, d.day)}<span class="mut">times in ${d.tz.replace(/_/g, ' ')}</span></div><div id="schedule">${scheduleTable(d.schedule, d.day.today ? 'No merges scheduled today.' : `No merges scheduled on ${d.day.label}.`)}</div></section>
 ${holdsSection(d.holds)}
 ${messagesSection(d.messages, d.now)}
 </div>${sideColumn(d.agents, d.todos, d.changes)}</div>`,
-    { nonce: d.nonce, script: true },
+    { nonce: d.nonce },
   );
 }
 
@@ -630,7 +645,7 @@ ${panel(html`<p class="sub">${d.showAll
         ? html`Showing every entry. <a href="${base}/calendar">Show pending only</a>`
         : html`${d.hidden} past or closed ${d.hidden === 1 ? 'entry' : 'entries'} hidden. <a href="${base}/calendar?show=all">Show all</a>`}</p>`)}
 ${panel(d.events.length
-        ? html`<table class="tbl"><thead><tr><th>When (UTC)</th><th>Event</th><th>State</th><th><span class="vh">Actions</span></th></tr></thead><tbody>${d.events.map(
+        ? html`<table class="tbl"><thead><tr><th>When</th><th>Event</th><th>State</th><th><span class="vh">Actions</span></th></tr></thead><tbody>${d.events.map(
             (e) => html`<tr class="${e.cancelled ? 't-off dim' : e.mergedAt ? 't-off' : 't-info'}"><td>${utc(e.startsAt)}<div class="sub">entered as ${e.enteredAs}</div></td>
 <td class="wide" data-label="Event">${e.title}${e.repo ? html` <span class="ref">${e.repo}#${e.pr}</span>${e.merger ? html`<span class="mut">, merger ${e.merger}</span>` : ''}` : ''}<div class="sub">${e.importance === 'high' ? html`<strong>high</strong>` : e.importance}, by ${e.createdBy}</div></td>
 <td data-label="State">${e.cancelled ? badge('cancelled', 'off') : e.mergedAt ? html`${badge('merged', 'off')}<div class="sub">${utc(e.mergedAt)}</div>` : badge('scheduled', 'info')}</td>
@@ -708,12 +723,14 @@ ${confirmPost(`${base}/archive`, 'Archive project', 'Yes, archive this project')
   }
 }
 
-export function sectionPage(d: { project: ProjectRow; data: SectionData; error?: string; shown?: Shown }): Html {
+export function sectionPage(d: { project: ProjectRow; data: SectionData; error?: string; shown?: Shown; tz?: string; nonce?: string; now?: string; reload?: boolean }): Html {
+  useZone(d.tz, d.now, d.reload);
   const label = SECTION_LABEL[d.data.section];
   return layout(
     `Echo ${d.project.name} ${label}`,
     html`${projectHead(d.project, d.data.section)}
 <h2 class="page-title">${label}</h2>${d.error ? banner(d.error, 'err') : ''}${d.shown ? shownBanner(d.shown) : ''}
 ${sectionBody(d.project, d.data)}`,
+    { nonce: d.nonce },
   );
 }

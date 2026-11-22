@@ -117,7 +117,7 @@ describe('admin login and guards', () => {
     const cspA = a.headers.get('content-security-policy')!;
     expect(cspA).toMatch(/^default-src 'self'; style-src 'unsafe-inline'; script-src 'self' 'nonce-[\w-]+'; form-action 'self'; frame-ancestors 'none'$/);
     const nonce = cspA.match(/'nonce-([\w-]+)'/)![1]!;
-    expect(await a.text()).toContain(`<script nonce="${nonce}">`);
+    expect(await a.text()).toContain(`<script nonce="${nonce}" data-reload=`);
     expect(b.headers.get('content-security-policy')).not.toBe(cspA);
 
     const out = await post('/admin/logout', cookie);
@@ -269,7 +269,7 @@ describe('admin views', () => {
     expect(html).not.toContain('checked in never');
     await ctx.db.prepare(`UPDATE agents SET last_checked_in_at = '2026-11-19T15:41:00.000Z' WHERE id = ?`).bind(s.alice.id).run();
     html = await (await get(`/admin/p/${s.project.id}`, cookie)).text();
-    expect(html).toMatch(/checked in <time[^>]*>Nov 19, 15:41 UTC<\/time>/);
+    expect(html).toMatch(/checked in <time[^>]*>Nov 19, 10:41 AM EST<\/time>/);
   });
 
   it('shows the notify_url banner when unset, and the failed GitHub status banner naming repo and error', async () => {
