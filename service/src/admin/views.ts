@@ -12,11 +12,25 @@ import type { Todo } from '../domain/todos';
 import { DEFAULT_ZONE, TZ_SCRIPT, fmtDateTime, fmtTime } from './localtime';
 import type { DayOption } from './localtime';
 import { summarizeMergeDetail } from './summary';
+import { isMarkdownDoc, renderMarkdown } from './markdown';
 
 // Every dynamic value below goes through `html` tagged templates, which escape it. `raw()` is used only for the static
 // CSS and the static script, neither of which contains any server data.
 
 type Html = ReturnType<typeof html>;
+
+/** An open document: rendered markdown with the raw text one click away, or the plain text for anything else.
+ *  With rawOnly the renderer is never called. */
+function docBody(doc: Document, rawOnly: boolean, base: string): Html {
+  const md = isMarkdownDoc(doc);
+  const rendered = md && !rawOnly ? renderMarkdown(doc.content) : null;
+  const q = `${base}/documents/${encodeURIComponent(doc.name)}?version=${doc.version}`;
+  if (rendered !== null) {
+    return html`<p class="hint"><a href="${q}&raw=1">View raw only</a></p><div class="md">${raw(rendered)}</div><details class="rawdoc"><summary>Raw markdown</summary><pre>
+${doc.content}</pre></details>`;
+  }
+  return html`${md && rawOnly ? html`<p class="hint">Raw only. <a href="${q}">View rendered</a></p>` : ''}${md && !rawOnly ? html`<p class="hint">Too large to render, showing the raw text.</p>` : ''}<pre>${md ? '\n' : ''}${doc.content}</pre>`;
+}
 
 // The look: a strip board. Every row that carries a state has a coloured edge on its left, and every state is a badge
 // in one of six tones, used the same way on every page:
@@ -244,6 +258,24 @@ time { white-space: nowrap; }
 .notes .meta { font-size: 13px; color: var(--mut); margin-bottom: 5px; }
 .notes form { display: flex; flex-direction: column; gap: 8px; align-items: flex-end; }
 pre { white-space: pre-wrap; word-break: break-word; margin: 0; padding: 14px 16px; background: var(--sunk); border: 1px solid var(--hair); border-radius: 8px; line-height: 1.5; max-height: 70vh; overflow: auto; }
+.md { line-height: 1.6; overflow-wrap: anywhere; }
+.md > :first-child { margin-top: 0; }
+.md h1, .md h2, .md h3, .md h4, .md h5, .md h6 { margin: 1.2em 0 .5em; line-height: 1.25; }
+.md h1 { font-size: 1.5em; } .md h2 { font-size: 1.25em; } .md h3 { font-size: 1.1em; }
+.md p, .md ul, .md ol, .md blockquote, .md .tblwrap { margin: 0 0 .9em; }
+.md ul, .md ol { padding-left: 1.6em; }
+.md blockquote { padding: 2px 14px; border-left: 3px solid var(--rule); color: var(--mut); }
+.md code { font-family: var(--f-code); background: var(--sunk); padding: 1px 5px; border-radius: 4px; }
+.md pre { margin: 0 0 .9em; }
+.md pre code { background: none; padding: 0; }
+.md hr { border: 0; border-top: 1px solid var(--rule); margin: 1.2em 0; }
+.tblwrap { overflow-x: auto; }
+.md table { border-collapse: collapse; }
+.md th, .md td { border: 1px solid var(--rule); padding: 5px 10px; text-align: left; vertical-align: top; }
+.md th { background: var(--sunk); }
+.rawdoc { margin-top: 14px; }
+.rawlink { font-size: 12px; margin-left: 6px; color: var(--mut); }
+.rawdoc summary { cursor: pointer; color: var(--mut); font-size: 13px; margin-bottom: 8px; }
 
 /* login and plain pages */
 .solo { max-width: 420px; margin: 8vh auto 0; }
@@ -582,7 +614,7 @@ export type SectionData =
   | { section: 'todos'; todos: Todo[] }
   | { section: 'calendar'; events: EventView[]; hidden: number; showAll: boolean }
   | { section: 'scratchpad'; entries: ScratchEntry[] }
-  | { section: 'documents'; docs: { info: DocumentInfo; versions: number[] }[]; open?: Document }
+  | { section: 'documents'; docs: { info: DocumentInfo; versions: number[] }[]; open?: Document; rawOnly?: boolean }
   | { section: 'agents'; members: AgentRow[]; others: AgentRow[] }
   | { section: 'repos'; repos: RepoStatusRow[] }
   | { section: 'webhooks'; hooks: WebhookInfo[] }
@@ -664,12 +696,12 @@ ${post(`${base}/events/${e.id}/cancel${keep}`, 'Cancel event', {}, false, 'small
         : panel(html`<p class="empty">The scratchpad is empty.</p>`);
     case 'documents':
       return html`${d.open
-        ? html`<section class="panel"><div class="ph"><h2>${d.open.name}, version ${d.open.version}</h2></div><p class="sub">${d.open.format}, saved by ${d.open.savedBy} at ${utc(d.open.createdAt)}</p><pre>${d.open.content}</pre></section>`
+        ? html`<section class="panel"><div class="ph"><h2>${d.open.name}, version ${d.open.version}</h2></div><p class="sub">${d.open.format}, saved by ${d.open.savedBy} at ${utc(d.open.createdAt)}</p>${docBody(d.open, d.rawOnly === true, base)}</section>`
         : ''}
 ${panel(d.docs.length
         ? html`<table class="tbl"><thead><tr><th>Name</th><th>Versions</th><th><span class="vh">Actions</span></th></tr></thead><tbody>${d.docs.map(
-            (x) => html`<tr><td><a class="ref" href="${base}/documents/${encodeURIComponent(x.info.name)}">${x.info.name}</a><div class="sub">${x.info.format}, latest by ${x.info.savedBy}, ${utc(x.info.createdAt)}</div></td>
-<td class="wide" data-label="Versions"><div class="vers">${x.versions.map((v) => html`<a href="${base}/documents/${encodeURIComponent(x.info.name)}?version=${v}" class="${d.open && d.open.name === x.info.name && d.open.version === v ? 'on' : ''}">v${v}</a> `)}</div></td>
+            (x) => html`<tr><td><a class="ref" href="${base}/documents/${encodeURIComponent(x.info.name)}${d.rawOnly && d.open && d.open.name === x.info.name ? '?raw=1' : ''}">${x.info.name}</a>${isMarkdownDoc(x.info) ? html` <a class="rawlink" href="${base}/documents/${encodeURIComponent(x.info.name)}?raw=1">raw</a>` : ''}<div class="sub">${x.info.format}, latest by ${x.info.savedBy}, ${utc(x.info.createdAt)}</div></td>
+<td class="wide" data-label="Versions"><div class="vers">${x.versions.map((v) => html`<a href="${base}/documents/${encodeURIComponent(x.info.name)}?version=${v}${d.rawOnly && d.open && d.open.name === x.info.name ? '&raw=1' : ''}" class="${d.open && d.open.name === x.info.name && d.open.version === v ? 'on' : ''}">v${v}</a> `)}</div></td>
 <td class="acts">${confirmPost(`${base}/documents/delete`, 'Delete', 'Yes, delete every version', { name: x.info.name })}</td></tr>`,
           )}</tbody></table>`
         : html`<p class="empty">No documents.</p>`)}`;

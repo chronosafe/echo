@@ -260,7 +260,7 @@ const SECTIONS: Section[] = ['messages', 'todos', 'calendar', 'scratchpad', 'doc
 const ADMIN_ACTOR: Actor = { kind: 'admin' };
 const EVERYTHING = { from: '1970-01-01T00:00:00Z', to: '2200-01-01T00:00:00Z' };
 
-async function sectionData(ctx: Ctx, projectId: number, section: Section, open?: Document, showAll = false): Promise<SectionData> {
+async function sectionData(ctx: Ctx, projectId: number, section: Section, open?: Document, showAll = false, rawOnly = false): Promise<SectionData> {
   switch (section) {
     case 'messages':
       return { section, lines: await allMessages(ctx, projectId) };
@@ -282,6 +282,7 @@ async function sectionData(ctx: Ctx, projectId: number, section: Section, open?:
       return {
         section,
         open,
+        rawOnly,
         docs: await Promise.all(docs.map(async (info) => ({ info, versions: (await listVersions(ctx, ADMIN_ACTOR, projectId, info.name)).map((v) => v.version) }))),
       };
     }
@@ -318,10 +319,10 @@ async function renderSection(
   ctx: Ctx,
   projectId: number,
   section: Section,
-  o: { error?: string; shown?: Shown; status?: ContentfulStatusCode; open?: Document; showAll?: boolean } = {},
+  o: { error?: string; shown?: Shown; status?: ContentfulStatusCode; open?: Document; showAll?: boolean; rawOnly?: boolean } = {},
 ) {
   const project = await getProject(ctx, projectId);
-  const data = await sectionData(ctx, projectId, section, o.open, o.showAll);
+  const data = await sectionData(ctx, projectId, section, o.open, o.showAll, o.rawOnly);
   return c.html(sectionPage({ project, data, error: o.error, shown: o.shown, tz: zoneOf(c), nonce: c.get('nonce'), now: ctx.now(), reload: c.req.method === 'GET' }), o.status ?? 200);
 }
 
@@ -347,7 +348,8 @@ admin.get('/p/:id/documents/:name', async (c) => {
   const ctx = makeCtx(c.env);
   try {
     const open = await getDocument(ctx, ADMIN_ACTOR, id, c.req.param('name'), version);
-    return await renderSection(c, ctx, id, 'documents', { open });
+    // ?raw=1 never calls the markdown renderer: the way back in for a document whose rendering is too slow or fails.
+    return await renderSection(c, ctx, id, 'documents', { open, rawOnly: c.req.query('raw') === '1' });
   } catch (e) {
     if (e instanceof EchoError && e.kind === 'rule') return errorResponse(c, e);
     throw e;
