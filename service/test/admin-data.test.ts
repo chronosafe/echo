@@ -75,7 +75,7 @@ describe('list', () => {
     await put('rulings/a', { r: 1 }, 0, { owner: 'me', note: 'owner, verbatim' });
     await put('rulings/b_c', 'x', 0);
     await put('rulings/bXc', 'y', 0);
-    await put('evenings/2026-11-26', { by: 'Bob' }, 0);
+    await put('slots/2026-03-12', { by: 'Bob' }, 0);
     await put('top', 1, 0);
     await put('gone', 1, 0);
     await deleteEntry(ctx, A(), { projectId: s.project.id, key: 'gone', expectedVersion: 1 });
@@ -86,7 +86,7 @@ describe('list', () => {
     expect(t).toContain('5 live keys');
     expect(t).toMatch(/History: 7 versions, \d/);
     expect(t).toContain('rulings/ 3');
-    expect(t).toContain('evenings/ 1');
+    expect(t).toContain('slots/ 1');
     expect(t).toContain('No namespace 1');
     expect(t).toContain('owner, verbatim');
     expect(t).toContain('shared');

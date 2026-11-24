@@ -226,10 +226,10 @@ describe('query plans of shared data', () => {
     path = 'put (create, update, owner)';
     await putEntry(ctx, s.aliceA, { projectId: P, key: 'rulings/a', value: { v: 1 }, expectedVersion: 0, owner: 'me', requestId: 'r1', notify: ['Bob'] });
     await putEntry(ctx, s.aliceA, { projectId: P, key: 'rulings/a', value: { v: 2 }, expectedVersion: 1, note: 'n' });
-    await putEntry(ctx, s.aliceA, { projectId: P, key: 'evenings/x_1', value: 1, expectedVersion: 0 });
+    await putEntry(ctx, s.aliceA, { projectId: P, key: 'slots/x_1', value: 1, expectedVersion: 0 });
     path = 'delete and revive';
-    await deleteEntry(ctx, s.aliceA, { projectId: P, key: 'evenings/x_1', expectedVersion: 1 });
-    await putEntry(ctx, s.aliceA, { projectId: P, key: 'evenings/x_1', value: 2, expectedVersion: 2 });
+    await deleteEntry(ctx, s.aliceA, { projectId: P, key: 'slots/x_1', expectedVersion: 1 });
+    await putEntry(ctx, s.aliceA, { projectId: P, key: 'slots/x_1', value: 2, expectedVersion: 2 });
     path = 'batch with check';
     await batchWrite(ctx, s.bobA, {
       projectId: P,
@@ -237,7 +237,7 @@ describe('query plans of shared data', () => {
       ops: [
         { op: 'check', key: 'rulings/a', expectedVersion: 2 },
         { op: 'put', key: 'b/1', value: 1, expectedVersion: 0 },
-        { op: 'delete', key: 'evenings/x_1', expectedVersion: 3 },
+        { op: 'delete', key: 'slots/x_1', expectedVersion: 3 },
       ],
     });
     path = 'retry by request_id';
@@ -247,10 +247,10 @@ describe('query plans of shared data', () => {
     path = 'reads';
     await getEntry(ctx, s.bobA, P, 'rulings/a');
     await getEntry(ctx, s.bobA, P, 'rulings/a', 1);
-    await getEntry(ctx, s.bobA, P, 'evenings/x_1').catch(() => undefined);
+    await getEntry(ctx, s.bobA, P, 'slots/x_1').catch(() => undefined);
     await listEntries(ctx, s.bobA, P, {});
     await listEntries(ctx, s.bobA, P, { prefix: 'rulings/', includeValues: true });
-    await listEntries(ctx, s.bobA, P, { prefix: 'evenings/x_', includeDeleted: true, afterKey: 'a', limit: 5 });
+    await listEntries(ctx, s.bobA, P, { prefix: 'slots/x_', includeDeleted: true, afterKey: 'a', limit: 5 });
     await entryHistory(ctx, s.bobA, P, 'rulings/a');
     await entryHistory(ctx, s.bobA, P, 'rulings/a', { beforeVersion: 2, limit: 1, includeValues: false });
     path = 'admin';

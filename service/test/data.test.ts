@@ -337,16 +337,16 @@ describe('batches', () => {
 
   it('applies puts, deletes and checks together under one batch id', async () => {
     await put(A(), 'ruling', 'v4', 0);
-    await put(A(), 'evening/mon', 'booked', 0);
+    await put(A(), 'slot/mon', 'booked', 0);
     const r = await batchWrite(ctx, A(), {
       ...ops(
         { op: 'check', key: 'ruling', expectedVersion: 1 },
-        { op: 'delete', key: 'evening/mon', expectedVersion: 1 },
-        { op: 'put', key: 'evening/tue', value: 'booked', expectedVersion: 0 },
+        { op: 'delete', key: 'slot/mon', expectedVersion: 1 },
+        { op: 'put', key: 'slot/tue', value: 'booked', expectedVersion: 0 },
       ),
       note: 'move monday to tuesday',
     });
-    expect(r.results).toEqual([{ key: 'ruling', version: 1 }, { key: 'evening/mon', version: 2 }, { key: 'evening/tue', version: 1 }]);
+    expect(r.results).toEqual([{ key: 'ruling', version: 1 }, { key: 'slot/mon', version: 2 }, { key: 'slot/tue', version: 1 }]);
     const sizes = await batchSizes();
     expect(sizes.get(r.batchId!)).toBe(2); // the check wrote nothing
     expect(sizes.size).toBe(1);

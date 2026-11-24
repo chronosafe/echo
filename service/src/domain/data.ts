@@ -131,14 +131,14 @@ export function serializeValue(value: unknown): string {
   }
   const n = bytesOf(text);
   if (n > MAX_VALUE_BYTES) {
-    throw ruleError('VALUE_TOO_LARGE', `The value is ${n} bytes; the limit is ${MAX_VALUE_BYTES}.`, 'Split it into several keys (for example one per evening or per ruling) or trim it.');
+    throw ruleError('VALUE_TOO_LARGE', `The value is ${n} bytes; the limit is ${MAX_VALUE_BYTES}.`, 'Split it into several keys (for example one per slot or per ruling) or trim it.');
   }
   return text;
 }
 
 function checkRequestId(requestId: string | undefined): void {
   if (requestId !== undefined && !REQUEST_ID_PATTERN.test(requestId)) {
-    throw ruleError('BAD_REQUEST_ID', 'request_id must be 1 to 64 characters from A-Z a-z 0-9 . _ : - .', 'Use a short id such as "book-evening-1", new for each distinct write.');
+    throw ruleError('BAD_REQUEST_ID', 'request_id must be 1 to 64 characters from A-Z a-z 0-9 . _ : - .', 'Use a short id such as "book-slot-1", new for each distinct write.');
   }
 }
 

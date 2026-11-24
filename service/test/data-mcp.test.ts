@@ -109,13 +109,13 @@ describe('data tools: behavior', () => {
 
   it('batch with a check; a conflict in a batch names every key; retries return the first result', async () => {
     await ok(s.alice.token, 'echo_data_put', { project: 'core', key: 'ruling', value: 'v', expected_version: 0 });
-    const args = { project: 'core', note: 'book', request_id: 'bk-1', ops: [{ op: 'check', key: 'ruling', expected_version: 1 }, { op: 'put', key: 'evening/2026-11-26', value: { by: 'Alice' }, expected_version: 0 }] };
+    const args = { project: 'core', note: 'book', request_id: 'bk-1', ops: [{ op: 'check', key: 'ruling', expected_version: 1 }, { op: 'put', key: 'slot/2026-03-12', value: { by: 'Alice' }, expected_version: 0 }] };
     const first = await ok(s.alice.token, 'echo_data_batch', args);
-    expect(first).toMatchObject({ batch_id: expect.any(String), results: [{ key: 'ruling', version: 1 }, { key: 'evening/2026-11-26', version: 1 }] });
+    expect(first).toMatchObject({ batch_id: expect.any(String), results: [{ key: 'ruling', version: 1 }, { key: 'slot/2026-03-12', version: 1 }] });
     expect(await ok(s.alice.token, 'echo_data_batch', args)).toEqual({ ...first, duplicate: true });
-    const clash = await mcpCall(s.bob.token, 'echo_data_batch', { project: 'core', ops: [{ op: 'put', key: 'ruling', value: 1, expected_version: 9 }, { op: 'put', key: 'evening/2026-11-26', value: 1, expected_version: 0 }] });
+    const clash = await mcpCall(s.bob.token, 'echo_data_batch', { project: 'core', ops: [{ op: 'put', key: 'ruling', value: 1, expected_version: 9 }, { op: 'put', key: 'slot/2026-03-12', value: 1, expected_version: 0 }] });
     expect(clash.text).toMatch(/^Refused \(rule VERSION_CONFLICT\)/);
-    expect(JSON.parse(clash.text.split('\nDetails: ')[1]!).conflicts.map((c: any) => c.key)).toEqual(['ruling', 'evening/2026-11-26']);
+    expect(JSON.parse(clash.text.split('\nDetails: ')[1]!).conflicts.map((c: any) => c.key)).toEqual(['ruling', 'slot/2026-03-12']);
     await assertConsistent();
   });
 
