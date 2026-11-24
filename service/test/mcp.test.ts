@@ -59,6 +59,7 @@ describe('identity', () => {
         'echo_todo_add', 'echo_todo_list', 'echo_todo_claim', 'echo_todo_release', 'echo_todo_complete',
         'echo_scratchpad_append', 'echo_scratchpad_read',
         'echo_doc_save', 'echo_doc_get', 'echo_doc_list', 'echo_doc_versions', 'echo_changes_since',
+        'echo_data_get', 'echo_data_list', 'echo_data_put', 'echo_data_delete', 'echo_data_batch', 'echo_data_history',
       ].sort(),
     );
     expect(byName.echo_send_message.description).toMatch(/document/i);

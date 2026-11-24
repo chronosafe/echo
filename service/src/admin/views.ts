@@ -13,6 +13,9 @@ import { DEFAULT_ZONE, TZ_SCRIPT, fmtDateTime, fmtTime } from './localtime';
 import type { DayOption } from './localtime';
 import { summarizeMergeDetail } from './summary';
 import { isMarkdownDoc, renderMarkdown } from './markdown';
+import type { AdminEntryView, AdminList, AdminVersionView } from '../domain/data';
+import type { DiffLine } from './data-view';
+import { pretty, visible } from './data-view';
 
 // Every dynamic value below goes through `html` tagged templates, which escape it. `raw()` is used only for the static
 // CSS and the static script, neither of which contains any server data.
@@ -253,6 +256,13 @@ time { white-space: nowrap; }
 .vers { display: flex; flex-wrap: wrap; gap: 4px; }
 .vers a { padding: 1px 8px; border-radius: 999px; border: 1px solid var(--rule); text-decoration: none; font-size: 13px; }
 .vers a.on { background: var(--acc); border-color: var(--acc); color: var(--acc-ink); }
+.dgroup { margin: 14px 0 4px; font-size: 13px; color: var(--mut); text-transform: none; }
+.pv { font-family: var(--f-code); font-size: 13px; color: var(--mut); overflow-wrap: anywhere; }
+.diff { padding: 0; }
+.diff div { padding: 0 12px; white-space: pre-wrap; word-break: break-word; font-family: var(--f-code); font-size: 13px; line-height: 1.5; }
+.diff .add { background: rgba(46, 160, 67, .2); } .diff .del { background: rgba(248, 81, 73, .2); } .diff .gap { color: var(--mut); background: var(--hair); }
+.repair { display: flex; flex-wrap: wrap; gap: 12px; margin-top: 12px; } .repair details { flex: 1 1 280px; }
+.repair input[type=text] { width: 100%; margin: 6px 0; }
 .notes { list-style: none; padding: 0; margin: 0 0 18px; }
 .notes > li { margin-bottom: 12px; }
 .notes .meta { font-size: 13px; color: var(--mut); margin-bottom: 5px; }
@@ -505,7 +515,14 @@ ${rows.map((m) => {
   }</section>`;
 }
 
-function sideColumn(agents: AgentRow[], todos: Todo[], changes: Change[]): Html {
+/** The key of a data.* change, from its data (subject_id is an INTEGER column and can mangle a numeric-looking key). */
+function dataKey(c: Change): string | null {
+  if (!c.kind.startsWith('data.')) return null;
+  const k = (c.data as { key?: unknown } | null)?.key;
+  return typeof k === 'string' ? k : null;
+}
+
+function sideColumn(projectId: number, agents: AgentRow[], todos: Todo[], changes: Change[]): Html {
   return html`<aside>
 <section class="panel"><h2>Agents</h2><ul class="plain">${agents.map(
     (a) => html`<li><span class="who">${a.name}</span>${a.revoked_at ? html` ${badge('revoked', 'stop')}` : ''}<div class="sub">${a.last_checked_in_at ? html`checked in ${utc(a.last_checked_in_at)}` : 'never checked in'}</div></li>`,
@@ -514,7 +531,7 @@ function sideColumn(agents: AgentRow[], todos: Todo[], changes: Change[]): Html 
     (t) => html`<li>${t.title}${t.claimedBy ? html`<div class="sub">claimed by ${t.claimedBy}</div>` : ''}</li>`,
   )}</ul>` : html`<p class="empty">None.</p>`}</section>
 <section class="panel"><h2>Recent changes</h2>${changes.length ? html`<ul class="plain">${changes.map(
-    (c) => html`<li class="change"><b>${c.kind}</b><div class="sub">${c.actor}, ${utc(c.at)}</div>${c.data ? html`<div class="data">${JSON.stringify(c.data).slice(0, 160)}</div>` : ''}</li>`,
+    (c) => html`<li class="change"><b>${c.kind}</b>${dataKey(c) !== null ? html` <a class="ref" href="/admin/p/${projectId}/data/entry?key=${encodeURIComponent(dataKey(c)!)}">${visible(dataKey(c)!)}</a>` : ''}<div class="sub">${visible(c.actor)}, ${utc(c.at)}</div>${c.data ? html`<div class="data">${visible(JSON.stringify(c.data).slice(0, 160))}</div>` : ''}</li>`,
   )}</ul>` : html`<p class="empty">No changes yet.</p>`}</section></aside>`;
 }
 
@@ -581,16 +598,16 @@ ${situation(d.holds, d.messages)}
 <section class="panel" id="merges"><div class="ph"><h2>${d.day.today ? "Today's merges" : html`Merges on ${d.day.label}`}</h2>${dayPicker(d.project.id, d.days, d.day)}<span class="mut">times in ${d.tz.replace(/_/g, ' ')}</span></div><div id="schedule">${scheduleTable(d.schedule, d.day.today ? 'No merges scheduled today.' : `No merges scheduled on ${d.day.label}.`)}</div></section>
 ${holdsSection(d.holds)}
 ${messagesSection(d.messages, d.now)}
-</div>${sideColumn(d.agents, d.todos, d.changes)}</div>`,
+</div>${sideColumn(d.project.id, d.agents, d.todos, d.changes)}</div>`,
     { nonce: d.nonce },
   );
 }
 
 // ---------------------------------------------------------------- project sub-pages
 
-export type Section = 'messages' | 'todos' | 'calendar' | 'scratchpad' | 'documents' | 'agents' | 'repos' | 'webhooks' | 'settings';
+export type Section = 'messages' | 'todos' | 'calendar' | 'scratchpad' | 'documents' | 'data' | 'agents' | 'repos' | 'webhooks' | 'settings';
 const SECTION_LABEL: Record<Section, string> = {
-  messages: 'Messages', todos: 'To-dos', calendar: 'Calendar', scratchpad: 'Scratchpad', documents: 'Documents',
+  messages: 'Messages', todos: 'To-dos', calendar: 'Calendar', scratchpad: 'Scratchpad', documents: 'Documents', data: 'Shared data',
   agents: 'Agents and tokens', repos: 'Repositories', webhooks: 'Webhooks', settings: 'Settings',
 };
 
@@ -609,12 +626,19 @@ function confirmPost(action: string, label: string, what: string, fields: Record
   )}<label><input type="checkbox" name="confirm" value="yes"> ${what}</label> <button class="small danger">${label}</button></form></details>`;
 }
 
+/** What the Shared data pages show; the route does the reading and the diffing, the view only renders. */
+export type DataPage =
+  | { view: 'list'; list: AdminList; prefix: string; deleted: boolean }
+  | { view: 'entry'; v: AdminEntryView; valuePretty: string | null }
+  | { view: 'version'; v: AdminVersionView; body: { kind: 'diff'; lines: DiffLine[] } | { kind: 'raw'; why: string; now: string | null; before: string | null } };
+
 export type SectionData =
   | { section: 'messages'; lines: MessageLine[] }
   | { section: 'todos'; todos: Todo[] }
   | { section: 'calendar'; events: EventView[]; hidden: number; showAll: boolean }
   | { section: 'scratchpad'; entries: ScratchEntry[] }
   | { section: 'documents'; docs: { info: DocumentInfo; versions: number[] }[]; open?: Document; rawOnly?: boolean }
+  | { section: 'data'; page: DataPage }
   | { section: 'agents'; members: AgentRow[]; others: AgentRow[] }
   | { section: 'repos'; repos: RepoStatusRow[] }
   | { section: 'webhooks'; hooks: WebhookInfo[] }
@@ -705,6 +729,8 @@ ${panel(d.docs.length
 <td class="acts">${confirmPost(`${base}/documents/delete`, 'Delete', 'Yes, delete every version', { name: x.info.name })}</td></tr>`,
           )}</tbody></table>`
         : html`<p class="empty">No documents.</p>`)}`;
+    case 'data':
+      return dataSection(base, d.page);
     case 'agents':
       return html`<div class="pair">${panel(html`<form method="post" action="${base}/agents"><h3>New agent</h3><div class="row"><input type="text" name="name" placeholder="Agent name" aria-label="Agent name" required> <button class="primary">Create agent</button></div>
 <p class="hint gap-top">Its token is shown once, on the next page.</p></form>`)}
@@ -753,6 +779,81 @@ ${confirmPost(`${base}/delete`, 'Delete permanently', 'Yes, delete this project 
         : html`<p>Archiving keeps all data. The project disappears from whoami, the MCP tools and the hooks. A project that still has registered repositories cannot be archived: remove its repositories first, because registered repositories stay gated.</p>
 ${confirmPost(`${base}/archive`, 'Archive project', 'Yes, archive this project')}`}</section>`;
   }
+}
+
+const entryHref = (base: string, key: string) => `${base}/data/entry?key=${encodeURIComponent(key)}`;
+const versionHref = (base: string, key: string, v: number) => `${base}/data/version?key=${encodeURIComponent(key)}&v=${v}`;
+const kib = (n: number) => (n < 1024 ? `${n} bytes` : `${(n / 1024).toFixed(1)} KiB`);
+
+/** A repair form: needs a reason and the confirm box; the hidden version makes a stale click fail. */
+function repairForm(action: string, label: string, what: string, key: string, version: number): Html {
+  return html`<details class="confirm"><summary class="btn small danger">${label}</summary><form method="post" action="${action}"><input type="hidden" name="key" value="${key}"><input type="hidden" name="version" value="${version}">
+<label>Reason (recorded in the history) <input type="text" name="reason" required maxlength="500"></label>
+<label><input type="checkbox" name="confirm" value="yes"> ${what}</label> <button class="small danger">${label}</button></form></details>`;
+}
+
+function opBadge(op: string): Html {
+  return badge(op, op === 'delete' || op === 'admin_delete' ? 'stop' : op === 'admin_release' ? 'wait' : 'info');
+}
+
+function dataSection(base: string, page: DataPage): Html {
+  if (page.view === 'list') {
+    const { list, prefix, deleted } = page;
+    const groups = new Map<string, typeof list.rows>();
+    for (const r of list.rows) {
+      const g = r.key.includes('/') ? r.key.slice(0, r.key.indexOf('/')) : '';
+      groups.set(g, [...(groups.get(g) ?? []), r]);
+    }
+    const ordered = [...groups.entries()].sort(([a], [b]) => (a === '' ? -1 : b === '' ? 1 : a < b ? -1 : a > b ? 1 : 0));
+    const qs = (extra: Record<string, string>) => {
+      const q = new URLSearchParams({ ...(prefix ? { prefix } : {}), ...(deleted ? { deleted: '1' } : {}), ...extra }).toString();
+      return `${base}/data${q ? `?${q}` : ''}`;
+    };
+    return html`${panel(html`<p class="sub">${list.live} live key${list.live === 1 ? '' : 's'} (limit 2000). History: ${list.historyRows} version${list.historyRows === 1 ? '' : 's'}, ${kib(list.historyBytes)}.</p>
+<form method="get" action="${base}/data" class="row"><input type="text" name="prefix" value="${/^[A-Za-z0-9._:/-]*$/.test(prefix) ? prefix : ''}" placeholder="Key prefix, for example rulings/" aria-label="Key prefix" maxlength="200"> <label><input type="checkbox" name="deleted" value="1"${deleted ? html` checked` : ''}> show deleted</label> <button class="small">Filter</button></form>`)}
+${list.rows.length
+      ? ordered.map(
+          ([g, rows]) => html`<section class="panel">${g ? html`<h3 class="dgroup">${visible(g)}/ ${count(rows.length)}</h3>` : html`<h3 class="dgroup">No namespace ${count(rows.length)}</h3>`}<table class="tbl"><thead><tr><th>Key</th><th>Version</th><th>Owner</th><th>Updated</th><th>Note and value</th></tr></thead><tbody>${rows.map(
+            (r) => html`<tr class="${r.deleted ? 'dim' : ''}"><td data-label="Key"><a class="ref" href="${entryHref(base, r.key)}">${visible(r.key)}</a>${r.deleted ? html` ${badge('deleted', 'off')}` : ''}</td><td data-label="Version">v${r.version}</td><td data-label="Owner">${r.owner ? visible(r.owner) : html`<span class="mut">shared</span>`}</td>
+<td data-label="Updated"><span class="who">${visible(r.updatedBy)}</span><div class="sub">${utc(r.updatedAt)}</div></td>
+<td class="wide" data-label="Note and value">${r.note ? html`<div>${visible(r.note)}</div>` : ''}${r.deleted ? '' : html`<div class="pv">${visible(r.preview)}${r.previewCut ? '\u2026' : ''}</div>`}</td></tr>`,
+          )}</tbody></table></section>`,
+        )
+      : panel(html`<p class="empty">${prefix || deleted ? 'No keys match.' : 'No shared data yet.'}</p>`)}
+${list.next ? html`<p><a href="${qs({ after: list.next })}">Next keys</a></p>` : ''}`;
+  }
+  if (page.view === 'entry') {
+    const { v, valuePretty } = page;
+    const e = v.entry;
+    const repair = e.deleted
+      ? ''
+      : html`<div class="repair">${e.owner ? repairForm(`${base}/data/release`, 'Release owner', `Yes, release ${visible(e.owner)}'s ownership`, v.key, e.version) : ''}${repairForm(`${base}/data/delete`, 'Delete entry', 'Yes, delete this entry (its history stays)', v.key, e.version)}</div>`;
+    return html`<p><a href="${base}/data">All keys</a></p>
+<section class="panel"><div class="ph"><h2>${visible(v.key)}</h2></div>
+<p class="sub">version ${e.version}${e.deleted ? html` ${badge('deleted', 'off')}` : ''}, ${e.owner ? html`owned by ${visible(e.owner)}` : 'shared'}, updated by ${visible(e.updatedBy)} ${utc(e.updatedAt)}${e.note ? html`, note: ${visible(e.note)}` : ''}</p>
+${e.valueText === null
+      ? html`<p class="empty">Deleted. The history below is kept.</p>`
+      : valuePretty !== null
+        ? html`<pre>
+${visible(valuePretty)}</pre>`
+        : html`<p class="hint">Too large to pretty-print; showing the stored text.</p><pre>
+${visible(e.valueText)}</pre>`}
+${repair}</section>
+${panel(html`<h3>History</h3><table class="tbl"><thead><tr><th>Version</th><th>Change</th><th>By</th><th>Note</th></tr></thead><tbody>${v.history.map(
+      (h) => html`<tr><td data-label="Version"><a class="ref" href="${versionHref(base, v.key, h.version)}">v${h.version}</a></td><td data-label="Change">${opBadge(h.op)}${h.batchId ? html` <span class="sub">batch ${h.batchId.slice(0, 8)}</span>` : ''}</td><td data-label="By"><span class="who">${visible(h.actor)}</span><div class="sub">${utc(h.at)}</div></td><td class="wide" data-label="Note">${h.note ? visible(h.note) : ''}</td></tr>`,
+    )}</tbody></table>${v.older ? html`<p><a href="${entryHref(base, v.key)}&before=${v.older}">Older versions</a></p>` : ''}`)}`;
+  }
+  const { v, body } = page;
+  const key = v.key;
+  return html`<p><a href="${entryHref(base, key)}">${visible(key)}</a>${v.prevVersion !== null ? html`, <a href="${versionHref(base, key, v.version - 1)}">previous (v${v.version - 1})</a>` : ''}${v.version < v.latest ? html`, <a href="${versionHref(base, key, v.version + 1)}">next (v${v.version + 1})</a>` : ''}</p>
+<section class="panel"><div class="ph"><h2>${visible(key)}, version ${v.version}</h2></div>
+<p class="sub">${opBadge(v.op)} by ${visible(v.actor)} ${utc(v.at)}${v.owner ? html`, owner ${visible(v.owner)}` : ', shared'}${v.note ? html`, note: ${visible(v.note)}` : ''}${v.batchId ? html`, batch ${v.batchId}` : ''}</p>
+${body.kind === 'diff'
+    ? html`${v.valueText !== null && pretty(v.valueText) !== null ? html`<h3>Value</h3><pre>
+${visible(pretty(v.valueText)!)}</pre>` : html`<p class="empty">This version has no value (a delete).</p>`}<h3>Changes from the previous version</h3>${body.lines.length ? '' : html`<p class="empty">No change in the value.</p>`}<div class="diff panel">${body.lines.map((l) => html`<div class="${l.t === '+' ? 'add' : l.t === '-' ? 'del' : l.t === ' ' ? '' : 'gap'}">${l.t === ' ' ? '  ' : l.t === '\u2026' ? '' : `${l.t} `}${l.text}</div>`)}</div>`
+    : html`<p class="hint">${body.why}</p>${body.now !== null ? html`<h3>This version</h3><pre>
+${visible(body.now)}</pre>` : html`<p class="empty">This version has no value (a delete).</p>`}${body.before !== null ? html`<details><summary>Previous version</summary><pre>
+${visible(body.before)}</pre></details>` : ''}`}</section>`;
 }
 
 export function sectionPage(d: { project: ProjectRow; data: SectionData; error?: string; shown?: Shown; tz?: string; nonce?: string; now?: string; reload?: boolean }): Html {

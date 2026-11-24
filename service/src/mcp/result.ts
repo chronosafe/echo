@@ -16,6 +16,6 @@ export async function toolResult(fn: () => Promise<unknown>): Promise<ToolResult
     if (!(e instanceof EchoError)) console.error('echo mcp tool failed', e);
     const err = e instanceof EchoError ? e : serviceError('INTERNAL', 'Echo hit an unexpected problem.');
     const head = err.kind === 'rule' ? `Refused (rule ${err.code})` : `Echo service problem (${err.code})`;
-    return { isError: true, content: [text(`${head}: ${err.message}\nWhat to do: ${err.fix}`)] };
+    return { isError: true, content: [text(`${head}: ${err.message}\nWhat to do: ${err.fix}${err.details === undefined ? '' : `\nDetails: ${JSON.stringify(err.details)}`}`)] };
   }
 }

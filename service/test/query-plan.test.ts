@@ -12,6 +12,8 @@ import { addWebhook, deliverWebhooks } from '../src/domain/webhooks';
 import { resetInstallationTokens } from '../src/github/app';
 import { runStatusJobs } from '../src/github/status';
 import { fakeGithub } from './fake-github';
+import { adminList, adminEntry, adminVersion, batchWrite, deleteEntry, entryHistory, getEntry, listEntries, putEntry, adminReleaseOwner } from '../src/domain/data';
+import { adminDeleteAgent, adminRevokeAgent } from '../src/domain/agents';
 import { fakeNet, seedApprovals, testCtx } from './helpers';
 
 /**
@@ -29,6 +31,9 @@ const GROWING = [
   'todos',
   'scratchpad_entries',
   'documents',
+  'data_entries',
+  'data_history',
+  'data_requests',
   'change_log',
   'pr_heads',
   'commit_statuses',
@@ -207,5 +212,82 @@ describe('query plans on the hook API and cron paths', () => {
       }
     }
     expect([...found.keys()].sort()).toEqual([]);
+  });
+});
+
+describe('query plans of shared data', () => {
+  it('every shared-data query reaches data_entries and data_history through an index', async () => {
+    const base = testCtx();
+    const recs: Rec[] = [];
+    let path = 'setup';
+    const s = await seedApprovals(base);
+    const ctx = Object.assign(base, { db: recording(env.DB, recs, () => path) });
+    const P = s.project.id;
+    path = 'put (create, update, owner)';
+    await putEntry(ctx, s.aliceA, { projectId: P, key: 'rulings/a', value: { v: 1 }, expectedVersion: 0, owner: 'me', requestId: 'r1', notify: ['Bob'] });
+    await putEntry(ctx, s.aliceA, { projectId: P, key: 'rulings/a', value: { v: 2 }, expectedVersion: 1, note: 'n' });
+    await putEntry(ctx, s.aliceA, { projectId: P, key: 'evenings/x_1', value: 1, expectedVersion: 0 });
+    path = 'delete and revive';
+    await deleteEntry(ctx, s.aliceA, { projectId: P, key: 'evenings/x_1', expectedVersion: 1 });
+    await putEntry(ctx, s.aliceA, { projectId: P, key: 'evenings/x_1', value: 2, expectedVersion: 2 });
+    path = 'batch with check';
+    await batchWrite(ctx, s.bobA, {
+      projectId: P,
+      notify: 'all',
+      ops: [
+        { op: 'check', key: 'rulings/a', expectedVersion: 2 },
+        { op: 'put', key: 'b/1', value: 1, expectedVersion: 0 },
+        { op: 'delete', key: 'evenings/x_1', expectedVersion: 3 },
+      ],
+    });
+    path = 'retry by request_id';
+    await putEntry(ctx, s.aliceA, { projectId: P, key: 'rulings/a', value: { v: 1 }, expectedVersion: 0, owner: 'me', requestId: 'r1' }).catch(() => undefined);
+    path = 'refused write (conflict read)';
+    await putEntry(ctx, s.bobA, { projectId: P, key: 'rulings/a', value: 1, expectedVersion: 9 }).catch(() => undefined);
+    path = 'reads';
+    await getEntry(ctx, s.bobA, P, 'rulings/a');
+    await getEntry(ctx, s.bobA, P, 'rulings/a', 1);
+    await getEntry(ctx, s.bobA, P, 'evenings/x_1').catch(() => undefined);
+    await listEntries(ctx, s.bobA, P, {});
+    await listEntries(ctx, s.bobA, P, { prefix: 'rulings/', includeValues: true });
+    await listEntries(ctx, s.bobA, P, { prefix: 'evenings/x_', includeDeleted: true, afterKey: 'a', limit: 5 });
+    await entryHistory(ctx, s.bobA, P, 'rulings/a');
+    await entryHistory(ctx, s.bobA, P, 'rulings/a', { beforeVersion: 2, limit: 1, includeValues: false });
+    path = 'admin';
+    await adminList(ctx, P, {});
+    await adminList(ctx, P, { prefix: 'rulings/', deleted: true, after: 'a' });
+    await adminEntry(ctx, P, 'rulings/a');
+    await adminEntry(ctx, P, 'rulings/a', 2);
+    await adminVersion(ctx, P, 'rulings/a', 2);
+    await adminReleaseOwner(ctx, P, 'rulings/a', 2, 'x').catch(() => undefined);
+    path = 'agent delete (data references)';
+    await adminRevokeAgent(ctx, s.carol.id);
+    await adminDeleteAgent(ctx, s.carol.id).catch(() => undefined);
+
+    const recorded = recs.filter((r) => r.path !== 'setup');
+    const paths = new Set(recorded.map((r) => r.path));
+    expect([...paths].sort()).toEqual(
+      ['admin', 'agent delete (data references)', 'batch with check', 'delete and revive', 'put (create, update, owner)', 'reads', 'refused write (conflict read)', 'retry by request_id'].sort(),
+    );
+    const touching = recorded.filter((r) => /data_(entries|history)/.test(r.sql));
+    expect(touching.length).toBeGreaterThan(30);
+    const found: string[] = [];
+    const seen = new Set<string>();
+    for (const r of touching) {
+      if (seen.has(r.sql)) continue;
+      seen.add(r.sql);
+      const bad = (await scans(r.sql, r.args)).filter((t) => t.startsWith('data_'));
+      // the live-count and request_id lookups must use their partial indexes: a SCAN of a data table is the failure
+      for (const t of bad) found.push(`${r.path} | ${t} | ${r.sql.replace(/\s+/g, ' ').trim().slice(0, 100)}`);
+    }
+    expect(found).toEqual([]);
+  });
+
+  it('the live-key count and the request_id lookup name their indexes', async () => {
+    const plan = async (sql: string, ...args: unknown[]) => (await env.DB.prepare(`EXPLAIN QUERY PLAN ${sql}`).bind(...args).all<{ detail: string }>()).results.map((r) => r.detail).join(' | ');
+    expect(await plan(`SELECT COUNT(*) AS n FROM data_entries WHERE project_id = ? AND deleted = 0`, 1)).toMatch(/idx_data_entries_live/);
+    expect(await plan(`SELECT key, version, op, value, batch_id FROM data_history WHERE project_id = ? AND actor = ? AND request_id = ?`, 1, 'a', 'r')).toMatch(/idx_data_history_request/);
+    expect(await plan(`SELECT 1 FROM data_history WHERE actor = ?`, 'x')).toMatch(/idx_data_history_actor/);
+    expect(await plan(`SELECT key FROM data_entries WHERE project_id = ?1 AND key >= ?2 AND key < ?3 AND deleted = 0 ORDER BY key LIMIT 10`, 1, 'a', 'b')).toMatch(/SEARCH data_entries/);
   });
 });

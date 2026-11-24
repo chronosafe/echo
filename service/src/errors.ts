@@ -5,14 +5,15 @@ export class EchoError extends Error {
     message: string,
     public fix: string,
     public status: number,
+    public details?: unknown,
   ) {
     super(message);
     this.name = 'EchoError';
   }
 }
 
-export function ruleError(code: string, message: string, fix: string, status = 400): EchoError {
-  return new EchoError('rule', code, message, fix, status);
+export function ruleError(code: string, message: string, fix: string, status = 400, details?: unknown): EchoError {
+  return new EchoError('rule', code, message, fix, status, details);
 }
 
 export function serviceError(code: string, message: string): EchoError {
@@ -27,12 +28,12 @@ export function serviceError(code: string, message: string): EchoError {
 
 export type ErrorBody = {
   ok: false;
-  error: { kind: 'rule' | 'service'; code: string; message: string; fix: string };
+  error: { kind: 'rule' | 'service'; code: string; message: string; fix: string; details?: unknown };
 };
 
 export function errorJson(e: unknown): ErrorBody {
   const err = e instanceof EchoError ? e : serviceError('INTERNAL', 'Echo hit an unexpected problem.');
-  return { ok: false, error: { kind: err.kind, code: err.code, message: err.message, fix: err.fix } };
+  return { ok: false, error: { kind: err.kind, code: err.code, message: err.message, fix: err.fix, ...(err.details === undefined ? {} : { details: err.details }) } };
 }
 
 export function errorStatus(e: unknown): number {

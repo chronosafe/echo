@@ -10,6 +10,7 @@ import { addEvent, cancelEvent, daySchedule, listEvents, updateEvent } from '../
 import type { Importance } from '../domain/calendar';
 import { recentChanges } from '../domain/changelog';
 import { adminAckHold, adminListHolds, adminReleaseHold } from '../domain/holds';
+import { adminDeleteEntry, adminEntry, adminList, adminReleaseOwner, adminVersion, isValidKey } from '../domain/data';
 import { adminDeleteDocument, getDocument, listDocuments, listVersions } from '../domain/documents';
 import type { Document } from '../domain/documents';
 import { postNotice } from '../domain/escalation';
@@ -41,8 +42,9 @@ import { parseZonedTime } from '../time';
 import { COOKIE, SESSION_MS, csp, makeSession, passwordOk, randomNonce, requireAdmin } from './auth';
 import type { AdminEnv } from './auth';
 import { chooseDay, dayOptions, dayRange, zoneFromCookieHeader } from './localtime';
+import { pretty, versionBody } from './data-view';
 import { loginPage, plainPage, projectPage, projectsPage, scheduleFragment, sectionPage } from './views';
-import type { Section, SectionData, Shown } from './views';
+import type { DataPage, Section, SectionData, Shown } from './views';
 
 export const admin = new Hono<AdminEnv>();
 
@@ -256,11 +258,11 @@ admin.post('/events/:id/approve', (c) =>
 
 // ---------------------------------------------------------------- project sub-pages
 
-const SECTIONS: Section[] = ['messages', 'todos', 'calendar', 'scratchpad', 'documents', 'agents', 'repos', 'webhooks', 'settings'];
+const SECTIONS: Section[] = ['messages', 'todos', 'calendar', 'scratchpad', 'documents', 'data', 'agents', 'repos', 'webhooks', 'settings'];
 const ADMIN_ACTOR: Actor = { kind: 'admin' };
 const EVERYTHING = { from: '1970-01-01T00:00:00Z', to: '2200-01-01T00:00:00Z' };
 
-async function sectionData(ctx: Ctx, projectId: number, section: Section, open?: Document, showAll = false, rawOnly = false): Promise<SectionData> {
+async function sectionData(ctx: Ctx, projectId: number, section: Section, open?: Document, showAll = false, rawOnly = false, data?: DataPage): Promise<SectionData> {
   switch (section) {
     case 'messages':
       return { section, lines: await allMessages(ctx, projectId) };
@@ -286,6 +288,8 @@ async function sectionData(ctx: Ctx, projectId: number, section: Section, open?:
         docs: await Promise.all(docs.map(async (info) => ({ info, versions: (await listVersions(ctx, ADMIN_ACTOR, projectId, info.name)).map((v) => v.version) }))),
       };
     }
+    case 'data':
+      return { section, page: data ?? { view: 'list', list: await adminList(ctx, projectId, {}), prefix: '', deleted: false } };
     case 'agents': {
       const members = await projectMembers(ctx, projectId);
       const ids = new Set(members.map((m) => m.id));
@@ -319,14 +323,79 @@ async function renderSection(
   ctx: Ctx,
   projectId: number,
   section: Section,
-  o: { error?: string; shown?: Shown; status?: ContentfulStatusCode; open?: Document; showAll?: boolean; rawOnly?: boolean } = {},
+  o: { error?: string; shown?: Shown; status?: ContentfulStatusCode; open?: Document; showAll?: boolean; rawOnly?: boolean; data?: DataPage } = {},
 ) {
   const project = await getProject(ctx, projectId);
-  const data = await sectionData(ctx, projectId, section, o.open, o.showAll, o.rawOnly);
+  const data = await sectionData(ctx, projectId, section, o.open, o.showAll, o.rawOnly, o.data);
   return c.html(sectionPage({ project, data, error: o.error, shown: o.shown, tz: zoneOf(c), nonce: c.get('nonce'), now: ctx.now(), reload: c.req.method === 'GET' }), o.status ?? 200);
 }
 
-for (const section of SECTIONS) {
+// Shared data. Keys travel in ?key= (never a path segment, so a browser cannot normalize "." or ".." away).
+const dataGone = (c: Context<AdminEnv>) => c.html(plainPage('Not found', 'There is no such key or version.'), 404);
+const wholeNumber = (t: string | undefined) => (t === undefined ? undefined : /^\d{1,15}$/.test(t) ? Number(t) : NaN);
+
+admin.get('/p/:id/data', async (c) => {
+  const id = idParam(c);
+  if (id === null) return c.html(plainPage('Not found', 'There is no such project.'), 404);
+  const ctx = makeCtx(c.env);
+  try {
+    const prefix = c.req.query('prefix') ?? '';
+    const deleted = c.req.query('deleted') === '1';
+    const list = await adminList(ctx, id, { prefix, deleted, after: c.req.query('after') });
+    return await renderSection(c, ctx, id, 'data', { data: { view: 'list', list, prefix, deleted } });
+  } catch (e) {
+    if (e instanceof EchoError && e.kind === 'rule') return errorResponse(c, e);
+    throw e;
+  }
+});
+
+admin.get('/p/:id/data/entry', async (c) => {
+  const id = idParam(c);
+  if (id === null) return c.html(plainPage('Not found', 'There is no such project.'), 404);
+  const key = c.req.query('key') ?? '';
+  const before = wholeNumber(c.req.query('before'));
+  if (!isValidKey(key) || Number.isNaN(before)) return dataGone(c);
+  const ctx = makeCtx(c.env);
+  try {
+    const v = await adminEntry(ctx, id, key, before);
+    return await renderSection(c, ctx, id, 'data', { data: { view: 'entry', v, valuePretty: v.entry.valueText === null ? null : pretty(v.entry.valueText) } });
+  } catch (e) {
+    if (e instanceof EchoError && e.kind === 'rule') return e.status === 404 ? dataGone(c) : errorResponse(c, e);
+    throw e;
+  }
+});
+
+admin.get('/p/:id/data/version', async (c) => {
+  const id = idParam(c);
+  if (id === null) return c.html(plainPage('Not found', 'There is no such project.'), 404);
+  const key = c.req.query('key') ?? '';
+  const version = wholeNumber(c.req.query('v'));
+  if (!isValidKey(key) || version === undefined || Number.isNaN(version) || version < 1) return dataGone(c);
+  const ctx = makeCtx(c.env);
+  try {
+    const v = await adminVersion(ctx, id, key, version);
+    return await renderSection(c, ctx, id, 'data', { data: { view: 'version', v, body: versionBody(v.valueText, v.prevText) } });
+  } catch (e) {
+    if (e instanceof EchoError && e.kind === 'rule') return e.status === 404 ? dataGone(c) : errorResponse(c, e);
+    throw e;
+  }
+});
+
+const dataRepair = (c: Context<AdminEnv>, run: typeof adminReleaseOwner) =>
+  act(
+    c,
+    'data',
+    (ctx, projectId, f) => {
+      const version = wholeNumber(f.version);
+      if (version === undefined || Number.isNaN(version) || version < 1) throw new EchoError('rule', 'BAD_ID', 'That version is not valid.', 'Use the button on the entry page.', 400);
+      return run(ctx, projectId, f.key ?? '', version, f.reason ?? '');
+    },
+    { confirm: true },
+  );
+admin.post('/p/:id/data/release', (c) => dataRepair(c, adminReleaseOwner));
+admin.post('/p/:id/data/delete', (c) => dataRepair(c, adminDeleteEntry));
+
+for (const section of SECTIONS.filter((x) => x !== 'data')) {
   admin.get(`/p/:id/${section}`, async (c) => {
     const id = idParam(c);
     if (id === null) return c.html(plainPage('Not found', 'There is no such project.'), 404);

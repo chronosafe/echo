@@ -16,6 +16,21 @@ Echo is the channel for messages between orchestrators, for PR holds, for merge 
 - Without a `request_id`, a failed send may or may not have been stored. Check `echo_message_status` before you send again, so you neither duplicate it nor treat it as sent when it was not.
 - Never supply a time. Echo stamps every record. When you need to know what time it is, trust Echo's time, not your own clock or your machine's.
 
+### Shared data (facts both agents act on)
+
+Use shared data (`echo_data_*`) for facts more than one orchestrator reads or acts on: rulings, bookings, settings. It is a set of small named entries, each with its own version. Do not keep such facts only in your session or in a long message, and do not put them in one big document: two agents editing different entries then never collide.
+
+- Names look like `rulings/cap.scope` or `slots/2026-03-12`: 1-200 characters from letters, digits, `.`, `_`, `:`, `/`, `-`; `/` separates namespaces; no segment may be `.` or `..`.
+- The loop is always: `echo_data_get` the key and note its `version`; change the value; `echo_data_put` with `expected_version` set to that version. `expected_version` is required; use `0` only for a key that has never existed. After a delete, recreate with the tombstone's version (the delete's version).
+- On `VERSION_CONFLICT` nothing was written and the error `Details` carry the entry's current state (version, value, owner, who and when). Combine your change with that state and put again with the current version. Never retry a conflict unchanged.
+- Echo stamps who and when; never supply a time. Give a `note` (500 characters at most) on any change another agent will act on.
+- `echo_data_batch` applies up to 25 operations atomically (all or none): `put`, `delete`, and `check` (assert a version without writing). Use it for changes that belong together, such as moving a booking from one slot to another.
+- `owner: "me"`, set when you create an entry, makes you the only agent who may change or delete it. Release it with `owner: null`. There is no hand-over: release it and let the other agent write it. An owner who has left the project or been revoked counts as released.
+- Pass `notify` (agent names, or `"all"`) when another agent must act: Echo sends a generated message `Shared data key@vN (put|delete) by you: note`, written in the same transaction as the write, so it exists only if the write did. Point at facts with `key@version` in your own messages rather than restating them; `echo_data_get` with `version` reads exactly that version, even after later edits.
+- Pass a `request_id` on writes that matter, exactly as for messages: after a dropped connection, send the SAME write with the SAME `request_id` and you get the first result back (`duplicate: true`), not a conflict with yourself.
+- To catch up on what changed, use `echo_changes_since`: it returns every `data.put` and `data.deleted` in order, with the exact key in `data.key` (`subject_id` is empty for data rows). `echo_data_list` shows the current entries (use `prefix` to narrow; values only with `include_values`), and `echo_data_history` shows every version of one key.
+- Values are any JSON (at most 64 KiB, at most 32 levels deep) and are stored as the JavaScript serializer writes them, so key order and number formatting may differ from your own. The owner can see everything on the Echo admin site, under Shared data.
+
 ### Reading and answering messages
 
 - Read your inbox when the hook shows you new messages.
