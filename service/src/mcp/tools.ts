@@ -8,6 +8,8 @@ import type { AgentRow } from '../domain/agents';
 import { approveMerge, objectMerge, pendingApprovals } from '../domain/approvals';
 import { addEvent, cancelEvent, listEvents, updateEvent } from '../domain/calendar';
 import { changesSince } from '../domain/changelog';
+import { batchWrite, deleteEntry, entryHistory, getEntry, listEntries, putEntry } from '../domain/data';
+import type { Entry, HistoryRow } from '../domain/data';
 import { getDocument, listDocuments, listVersions, saveDocument } from '../domain/documents';
 import { ackHold, listHolds, placeHold, releaseHold } from '../domain/holds';
 import { ackMessage, deferMessage, messageStatus, readInbox, REQUEST_ID_PATTERN, sendMessage, withdrawMessage } from '../domain/messages';
@@ -396,6 +398,171 @@ export function registerTools(server: McpServer, ctx: Ctx, agent: AgentRow): voi
         created_at: d.createdAt,
       })),
     }),
+  );
+
+  // ------------------------------------------------------------ shared data
+
+  const dkey = z.string().min(1).max(200).describe('1-200 chars from A-Z a-z 0-9 . _ : / - ; "/" separates namespaces; no leading/trailing "/", no "//", no segment "." or ".."');
+  const expectedVersion = z.number().int().nonnegative().describe('The version you read: 0 for a key that has never existed; a deleted key needs its tombstone version. Required: there is no unconditional write.');
+  const dnote = z.string().max(500).optional().describe('Why you changed it (500 chars at most). Give one for any change another agent will act on.');
+  const downer = z.union([z.literal('me'), z.null()]).optional().describe('"me": you own the entry (only when it is created). null: release it. Omit to leave the owner as it is.');
+  const dnotify = z
+    .union([z.literal('all'), z.array(z.string().min(1)).min(1).max(20)])
+    .optional()
+    .describe('Agent names, or "all": they get a generated message "Shared data key@vN (put|delete) by you: note", written in the same transaction as the write');
+  const drequest = z.string().regex(REQUEST_ID_PATTERN).optional().describe('Retry key, 1-64 chars of [A-Za-z0-9._:-]. Repeat it only to retry the SAME write: you get the first result back (duplicate: true), never a conflict with yourself.');
+  const dvalue = z
+    .unknown()
+    .refine((v) => v !== undefined, 'value is required')
+    .describe('Any JSON value (object, array, string, number, boolean, null): at most 65,536 bytes serialized, at most 32 levels deep. Stored as JSON.stringify of it, so key order and number formatting follow the JavaScript serializer.');
+
+  const LOOP =
+    'The loop: echo_data_get the key and note its version; change the value; echo_data_put with expected_version set to that version. ' +
+    'On VERSION_CONFLICT nothing was written: the error details carry the current state; merge your change with it and put again with the current version. Never retry a conflict unchanged.';
+
+  const entryView = (e: Entry) => ({
+    key: e.key,
+    version: e.version,
+    ...('value' in e ? { value: e.value } : {}),
+    owner: e.owner,
+    updated_by: e.updatedBy,
+    updated_at: e.updatedAt,
+    note: e.note,
+    deleted: e.deleted,
+  });
+  const historyView = (h: HistoryRow) => ({
+    version: h.version,
+    op: h.op,
+    ...('value' in h ? { value: h.value } : {}),
+    owner: h.owner,
+    actor: h.actor,
+    at: h.at,
+    note: h.note,
+    batch_id: h.batchId,
+  });
+
+  tool(
+    'echo_data_get',
+    'Read one shared-data entry: its value and version, who changed it last and when. With version, read that exact version from history (a message that says key@v3 points at it). ' +
+      'A deleted key is DATA_NOT_FOUND whose details give the tombstone version (the expected_version to recreate it). ' +
+      LOOP,
+    { project, key: dkey, version: id.optional() },
+    async (a) => {
+      const r = await getEntry(ctx, actor, await projectId(a.project), a.key, a.version);
+      return 'op' in r ? { key: r.key, ...historyView(r) } : entryView(r);
+    },
+  );
+
+  tool(
+    'echo_data_list',
+    'List shared-data entries in key order: key, version, owner, updated_by, updated_at, note, deleted (and the value with include_values). prefix matches keys that start with it, exactly (case-sensitive, "_" is literal). ' +
+      'limit defaults to 200, at most 500. A response stops early at 1 MiB; when more_after_key is present, pass it as after_key to continue. To follow changes, use echo_changes_since (data.put and data.deleted rows carry data.key).',
+    {
+      project,
+      prefix: z.string().max(200).optional(),
+      include_values: z.boolean().optional(),
+      include_deleted: z.boolean().optional(),
+      limit: z.number().int().optional(),
+      after_key: z.string().max(200).optional(),
+    },
+    async (a) => {
+      const r = await listEntries(ctx, actor, await projectId(a.project), {
+        prefix: a.prefix,
+        includeValues: a.include_values,
+        includeDeleted: a.include_deleted,
+        limit: a.limit,
+        afterKey: a.after_key,
+      });
+      return { entries: r.entries.map(entryView), ...(r.afterKey === undefined ? {} : { more_after_key: r.afterKey }) };
+    },
+  );
+
+  tool(
+    'echo_data_put',
+    'Create or change a shared-data entry, conditional on expected_version (0 to create a key that has never existed). Echo stamps who and when. ' +
+      'owner "me" makes you the only agent who may change or delete it (set it when you create the entry; there is no hand-over; release with owner null; an owner who has left the project or is revoked counts as released). ' +
+      'Returns {key, version, previous_version}. Refusals: VERSION_CONFLICT (409), NOT_OWNER (403). ' +
+      LOOP,
+    { project, key: dkey, value: dvalue, expected_version: expectedVersion, owner: downer, note: dnote, notify: dnotify, request_id: drequest },
+    async (a) => {
+      const r = await putEntry(ctx, actor, {
+        projectId: await projectId(a.project),
+        key: a.key,
+        value: a.value,
+        expectedVersion: a.expected_version,
+        owner: a.owner,
+        note: a.note,
+        notify: a.notify,
+        requestId: a.request_id,
+      });
+      return { key: r.key, version: r.version, previous_version: r.previousVersion, ...(r.duplicate ? { duplicate: true } : {}) };
+    },
+  );
+
+  tool(
+    'echo_data_delete',
+    'Delete a shared-data entry, conditional on expected_version. The key keeps a tombstone and its history; to create it again, put it with the tombstone version this returns. A delete releases the owner. ' + LOOP,
+    { project, key: dkey, expected_version: expectedVersion, note: dnote, notify: dnotify, request_id: drequest },
+    async (a) => {
+      const r = await deleteEntry(ctx, actor, {
+        projectId: await projectId(a.project),
+        key: a.key,
+        expectedVersion: a.expected_version,
+        note: a.note,
+        notify: a.notify,
+        requestId: a.request_id,
+      });
+      return { key: r.key, version: r.version, ...(r.duplicate ? { duplicate: true } : {}) };
+    },
+  );
+
+  tool(
+    'echo_data_batch',
+    'Apply 1-25 shared-data operations atomically: every operation applies, or none does (one VERSION_CONFLICT lists every conflicting key in its details). ' +
+      'Operations: put {key, value, expected_version, owner?}, delete {key, expected_version}, check {key, expected_version} (asserts the version, writes nothing: "only do this if the ruling I read is still v4"). ' +
+      'A key may appear once; at least one put or delete; the values add up to at most 512 KiB. One note, notify and request_id apply to the whole batch. Returns {batch_id, results: [{key, version}]}. ' +
+      LOOP,
+    {
+      project,
+      ops: z
+        .array(
+          z.discriminatedUnion('op', [
+            z.object({ op: z.literal('put'), key: dkey, value: dvalue, expected_version: expectedVersion, owner: downer }).strict(),
+            z.object({ op: z.literal('delete'), key: dkey, expected_version: expectedVersion }).strict(),
+            z.object({ op: z.literal('check'), key: dkey, expected_version: expectedVersion }).strict(),
+          ]),
+        )
+        .min(1)
+        .max(25),
+      note: dnote,
+      notify: dnotify,
+      request_id: drequest,
+    },
+    async (a) => {
+      const r = await batchWrite(ctx, actor, {
+        projectId: await projectId(a.project),
+        ops: a.ops.map((o) =>
+          o.op === 'put'
+            ? { op: 'put' as const, key: o.key, value: o.value, expectedVersion: o.expected_version, owner: o.owner }
+            : { op: o.op, key: o.key, expectedVersion: o.expected_version },
+        ),
+        note: a.note,
+        notify: a.notify,
+        requestId: a.request_id,
+      });
+      return { batch_id: r.batchId, results: r.results, ...(r.duplicate ? { duplicate: true } : {}) };
+    },
+  );
+
+  tool(
+    'echo_data_history',
+    'Every version of one entry, newest first: version, op (put, delete, admin_release, admin_delete), value, owner, actor, at, note, batch_id. limit defaults to 50, at most 200; before_version pages back. ' +
+      'include_values (default true) false leaves the values out. A response stops early at 1 MiB; when more_before_version is present pass it as before_version.',
+    { project, key: dkey, limit: z.number().int().optional(), before_version: id.optional(), include_values: z.boolean().optional() },
+    async (a) => {
+      const r = await entryHistory(ctx, actor, await projectId(a.project), a.key, { limit: a.limit, beforeVersion: a.before_version, includeValues: a.include_values });
+      return { versions: r.versions.map(historyView), ...(r.beforeVersion === undefined ? {} : { more_before_version: r.beforeVersion }) };
+    },
   );
 
   tool(

@@ -12,6 +12,7 @@ export type ChangeKind =
   | 'event.added' | 'event.updated' | 'event.moved' | 'event.cancelled'
   | 'scratchpad.appended' | 'scratchpad.edited' | 'scratchpad.cleared'
   | 'document.saved' | 'document.deleted'
+  | 'data.put' | 'data.deleted'
   | 'project.updated' | 'repo.registered' | 'repo.removed' | 'member.added' | 'member.removed' | 'webhook.added' | 'webhook.removed' | 'agent.reissued' | 'agent.revoked';
 
 export type Change = {

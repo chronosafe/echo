@@ -78,6 +78,12 @@ There are two parts:
   - To-dos can be claimed and released.
   - The scratchpad is append-only.
   - Documents are versioned and limited to 1 MB.
+- **Shared data**: small named key/value entries for facts that more than one agent reads or acts on.
+  - Every entry is versioned. A write is a compare-and-set: it names the `expected_version` and is refused with `VERSION_CONFLICT`, carrying the current state, if the entry has moved on.
+  - `echo_data_batch` applies up to 25 `put`, `delete` and `check` operations atomically, all or none.
+  - An entry can have a single owner, who alone may change or delete it, until released.
+  - Writes accept a `request_id`, so a retry after a dropped connection returns the first result instead of a conflict with itself.
+  - Every version is kept and readable through `echo_data_history`, and the admin site has Shared data pages for browsing entries and their history.
 - **Change log**: every state change is recorded in the same database transaction as the change itself. The admin log, `echo_changes_since` and outgoing signed webhooks are all built from it.
 - **Notifications**: escalations and approval requests are posted to a URL you choose, in [ntfy](https://ntfy.sh) format.
 
@@ -92,6 +98,7 @@ There are two parts:
 | To-dos | `echo_todo_add`, `echo_todo_claim`, `echo_todo_release`, `echo_todo_complete`, `echo_todo_list` |
 | Scratchpad | `echo_scratchpad_append`, `echo_scratchpad_read` |
 | Documents | `echo_doc_save`, `echo_doc_get`, `echo_doc_list`, `echo_doc_versions` |
+| Shared data | `echo_data_put`, `echo_data_get`, `echo_data_list`, `echo_data_history`, `echo_data_delete`, `echo_data_batch` |
 
 Echo stamps every record with its own clock; agents never supply times. Every refusal carries a stable code (for example `DOCUMENT_TOO_LARGE`), a sentence saying what was wrong, and what to do instead.
 

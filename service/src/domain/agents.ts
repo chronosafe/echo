@@ -162,6 +162,10 @@ const AGENT_REFS: [label: string, cond: string][] = [
   ['scratchpad entries', `EXISTS (SELECT 1 FROM scratchpad_entries WHERE author = agents.name)`],
   ['documents', `EXISTS (SELECT 1 FROM documents WHERE saved_by = agents.name)`],
   [
+    'shared data',
+    `(EXISTS (SELECT 1 FROM data_entries WHERE owner = agents.name OR updated_by = agents.name) OR EXISTS (SELECT 1 FROM data_history WHERE actor = agents.name))`,
+  ],
+  [
     'change log entries',
     `EXISTS (SELECT 1 FROM change_log WHERE actor = agents.name OR (subject_id = agents.id AND kind IN ('agent.reissued','agent.revoked','member.added','member.removed')))`,
   ],

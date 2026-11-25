@@ -55,11 +55,14 @@ async function fill(projectId: number, agentId: number, agentName: string, repoN
   await run(`INSERT INTO todos (project_id, title, added_by, created_at) VALUES (?,?,?,?)`, projectId, 't', agentName, t);
   await run(`INSERT INTO scratchpad_entries (project_id, author, body, created_at) VALUES (?,?,?,?)`, projectId, agentName, 'b', t);
   await run(`INSERT INTO documents (project_id, name, version, format, content, saved_by, created_at) VALUES (?,?,?,?,?,?,?)`, projectId, 'd', 1, 'markdown', 'x', agentName, t);
+  await run(`INSERT INTO data_entries (project_id, key, version, value, owner, updated_by, updated_at) VALUES (?,?,?,?,?,?,?)`, projectId, 'k', 1, '1', agentName, agentName, t);
+  await run(`INSERT INTO data_history (project_id, key, version, op, value, owner, actor, at) VALUES (?,?,?,?,?,?,?,?)`, projectId, 'k', 1, 'put', '1', agentName, agentName, t);
+  await run(`INSERT INTO data_requests (project_id, actor, request_id) VALUES (?,?,?)`, projectId, agentName, 'r');
   await run(`INSERT INTO change_log (project_id, at, actor, kind) VALUES (?,?,?,?)`, projectId, t, agentName, 'todo.added');
   await run(`INSERT INTO webhooks (project_id, url, secret, created_at) VALUES (?,?,?,?)`, projectId, 'https://x.example/h', 's', t);
 }
 
-const PROJECT_TABLES = ['project_agents', 'repos', 'messages', 'holds', 'events', 'todos', 'scratchpad_entries', 'documents', 'change_log', 'webhooks'];
+const PROJECT_TABLES = ['project_agents', 'repos', 'messages', 'holds', 'events', 'todos', 'scratchpad_entries', 'documents', 'data_entries', 'data_history', 'data_requests', 'change_log', 'webhooks'];
 
 /** Row counts of every table, restricted to the project (and its children) where scoped. */
 async function counts(projectId: number): Promise<Record<string, number>> {
@@ -138,7 +141,7 @@ describe('adminDeleteProject', () => {
     await adminDeleteProject(ctx, s.other.id);
     await adminDeleteAgent(ctx, s.carol.id);
     expect(await n(`SELECT COUNT(*) AS n FROM agents WHERE name = 'Carol'`)).toBe(0);
-    for (const tb of ['project_agents', 'messages', 'holds', 'events', 'todos', 'scratchpad_entries', 'documents', 'change_log', 'webhooks', 'message_recipients', 'event_approvers']) {
+    for (const tb of ['project_agents', 'messages', 'holds', 'events', 'todos', 'scratchpad_entries', 'documents', 'data_entries', 'data_history', 'data_requests', 'change_log', 'webhooks', 'message_recipients', 'event_approvers']) {
       expect(await n(`SELECT COUNT(*) AS n FROM ${tb} WHERE ${tb === 'message_recipients' || tb === 'event_approvers' ? 'agent_id' : tb === 'project_agents' ? 'agent_id' : 'project_id'} = ?`, tb === 'message_recipients' || tb === 'event_approvers' || tb === 'project_agents' ? s.carol.id : s.other.id), tb).toBe(0);
     }
   });
@@ -223,6 +226,9 @@ describe('adminDeleteAgent', () => {
     ['to-dos', (_a, nm, p) => env.DB.prepare(`INSERT INTO todos (project_id, title, added_by, created_at) VALUES (?,?,?,?)`).bind(p, 't', nm, T).run()],
     ['scratchpad entries', (_a, nm, p) => env.DB.prepare(`INSERT INTO scratchpad_entries (project_id, author, body, created_at) VALUES (?,?,?,?)`).bind(p, nm, 'b', T).run()],
     ['documents', (_a, nm, p) => env.DB.prepare(`INSERT INTO documents (project_id, name, version, format, content, saved_by, created_at) VALUES (?,?,?,?,?,?,?)`).bind(p, 'd', 1, 'markdown', 'x', nm, T).run()],
+    ['shared data', (_a, nm, p) => env.DB.prepare(`INSERT INTO data_entries (project_id, key, version, value, owner, updated_by, updated_at) VALUES (?,?,?,?,?,?,?)`).bind(p, 'k', 1, '1', nm, 'someone', T).run()],
+    ['shared data', (_a, nm, p) => env.DB.prepare(`INSERT INTO data_entries (project_id, key, version, value, updated_by, updated_at) VALUES (?,?,?,?,?,?)`).bind(p, 'k', 1, '1', nm, T).run()],
+    ['shared data', (_a, nm, p) => env.DB.prepare(`INSERT INTO data_history (project_id, key, version, op, value, actor, at) VALUES (?,?,?,?,?,?,?)`).bind(p, 'k', 1, 'put', '1', nm, T).run()],
     ['change log entries', (_a, nm, p) => env.DB.prepare(`INSERT INTO change_log (project_id, at, actor, kind) VALUES (?,?,?,?)`).bind(p, T, nm, 'todo.added').run()],
     ['change log entries', (a, _n, p) => env.DB.prepare(`INSERT INTO change_log (project_id, at, actor, kind, subject_id) VALUES (?,?,?,?,?)`).bind(p, T, 'admin', 'agent.revoked', a).run()],
   ];
